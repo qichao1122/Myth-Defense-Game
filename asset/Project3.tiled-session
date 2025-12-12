@@ -1,0 +1,106 @@
+{
+    "Map/SizeTest": {
+        "height": 4300,
+        "width": 2
+    },
+    "activeFile": "map1.tmx",
+    "expandedProjectPaths": [
+    ],
+    "fileStates": {
+        "": {
+            "scaleInDock": 1
+        },
+        "map1.tmx": {
+            "scale": 0.75,
+            "selectedLayer": 0,
+            "viewCenter": {
+                "x": 529.3333333333333,
+                "y": 664
+            }
+        },
+        "map1.tmx#grass": {
+            "scaleInDock": 1
+        },
+        "map1.tmx#left": {
+            "scaleInDock": 1
+        },
+        "map1.tmx#soil": {
+            "scaleInDock": 1
+        },
+        "map1.tmx#soil2": {
+            "scaleInDock": 1
+        },
+        "map1.tmx#tree": {
+            "scaleInDock": 1
+        },
+        "map2.tmx": {
+            "scale": 0.5,
+            "selectedLayer": 0,
+            "viewCenter": {
+                "x": 478,
+                "y": 649
+            }
+        },
+        "map2.tmx#concret": {
+            "scaleInDock": 1
+        },
+        "map2.tmx#concret1": {
+            "scaleInDock": 1
+        },
+        "map2.tmx#sand": {
+            "scaleInDock": 1
+        },
+        "map2.tmx#sand1": {
+            "scaleInDock": 1
+        },
+        "map2.tmx#towerDefense_tile085": {
+            "scaleInDock": 1
+        },
+        "map3.tmx": {
+            "scale": 0.5,
+            "selectedLayer": 0,
+            "viewCenter": {
+                "x": 803,
+                "y": 649
+            }
+        },
+        "map3.tmx#soil3": {
+            "scaleInDock": 1
+        },
+        "map3.tmx#soil4": {
+            "scaleInDock": 1
+        },
+        "map3.tmx#tree2": {
+            "scaleInDock": 1
+        },
+        "map3.tmx#wall1": {
+            "scaleInDock": 1
+        },
+        "map3.tmx#wall2": {
+            "scaleInDock": 1
+        }
+    },
+    "last.imagePath": "C:/Users/qicha/GolandProjects/Qichao_Zhang_Project3/asset",
+    "map.height": 25,
+    "map.lastUsedFormat": "tmx",
+    "map.tileHeight": 52,
+    "map.tileWidth": 52,
+    "map.width": 25,
+    "openFiles": [
+        "map1.tmx",
+        "map2.tmx",
+        "map3.tmx"
+    ],
+    "project": "Project3.tiled-project",
+    "recentFiles": [
+        "map3.tmx",
+        "map2.tmx",
+        "map1.tmx"
+    ],
+    "tileset.embedInMap": true,
+    "tileset.tileSize": {
+        "height": 52,
+        "width": 52
+    },
+    "tileset.type": 0
+}
