@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"embed"
 	"image"
+	"image/color"
+	_ "image/jpeg"
 	_ "image/png"
 	"math"
 
@@ -31,7 +33,13 @@ var (
 )
 
 type MythDefense struct {
-	Enemies []*Enemies
+	Enemies          []*Enemies
+	Towers           []*Towers
+	TowerImages      []*ebiten.Image // Available tower types
+	SelectedTower    int             // Index of selected tower (-1 = none)
+	DraggingTower    bool            // Whether currently dragging a tower
+	DragX, DragY     int             // Current drag position
+	PrevMousePressed bool            // Previous frame mouse state
 }
 
 type Enemies struct {
@@ -42,6 +50,17 @@ type Enemies struct {
 	Path      []Node // A* path
 	PathIndex int
 	Health    int
+}
+
+type Towers struct {
+	X, Y        float64       // Position
+	Img         *ebiten.Image // Tower sprite
+	TowerHealth int           // Health of the tower
+	Range       float64       // Attack range in pixels
+	Damage      int           // Damage per attack
+	AttackSpeed float64       // Attacks per second
+	Cooldown    float64       // Time until next attack
+	Target      *Enemies      // Current enemy target
 }
 
 type Node struct {
@@ -152,6 +171,130 @@ func drawEnemies(screen *ebiten.Image, enemies []*Enemies) {
 	}
 }
 
+func drawTowers(screen *ebiten.Image, towers []*Towers) {
+	for _, tower := range towers {
+		if tower.Img != nil {
+			drawOpts := &ebiten.DrawImageOptions{}
+			drawOpts.GeoM.Scale(0.5, 0.5)             // Scale FIRST
+			drawOpts.GeoM.Translate(tower.X, tower.Y) // Then translate
+			screen.DrawImage(tower.Img, drawOpts)
+		}
+	}
+}
+
+// drawTowerSelectionUI draws the tower selection panel in the bottom-right
+func drawTowerSelectionUI(screen *ebiten.Image, game *MythDefense) {
+	if len(game.TowerImages) == 0 {
+		return
+	}
+
+	// UI settings
+	iconSize := 60
+	padding := 10
+	startX := windowWidth - (iconSize + padding)
+	startY := windowHeight - (len(game.TowerImages)*(iconSize+padding) + padding)
+
+	// Draw background panel
+	for i := 0; i < len(game.TowerImages); i++ {
+		y := startY + i*(iconSize+padding)
+
+		// Draw selection highlight (yellow background)
+		if i == game.SelectedTower {
+			ebitenutil.DrawRect(screen, float64(startX-5), float64(y-5),
+				float64(iconSize+10), float64(iconSize+10),
+				color.RGBA{255, 255, 0, 128})
+		}
+
+		// Draw tower icon
+		if game.TowerImages[i] != nil {
+			drawOpts := &ebiten.DrawImageOptions{}
+
+			// Scale to fit icon size
+			imgBounds := game.TowerImages[i].Bounds()
+			scaleX := float64(iconSize) / float64(imgBounds.Dx())
+			scaleY := float64(iconSize) / float64(imgBounds.Dy())
+			scale := scaleX
+			if scaleY < scaleX {
+				scale = scaleY
+			}
+
+			drawOpts.GeoM.Scale(scale, scale)
+			drawOpts.GeoM.Translate(float64(startX), float64(y))
+			screen.DrawImage(game.TowerImages[i], drawOpts)
+		}
+
+		// Draw white border around icon
+		borderThickness := 2.0
+		borderColor := color.RGBA{255, 255, 255, 255}
+		// Top
+		ebitenutil.DrawRect(screen, float64(startX), float64(y),
+			float64(iconSize), borderThickness, borderColor)
+		// Bottom
+		ebitenutil.DrawRect(screen, float64(startX), float64(y+iconSize)-borderThickness,
+			float64(iconSize), borderThickness, borderColor)
+		// Left
+		ebitenutil.DrawRect(screen, float64(startX), float64(y),
+			borderThickness, float64(iconSize), borderColor)
+		// Right
+		ebitenutil.DrawRect(screen, float64(startX+iconSize)-borderThickness, float64(y),
+			borderThickness, float64(iconSize), borderColor)
+	}
+}
+
+// handleTowerSelection checks if mouse click is on tower selection UI
+func (g *MythDefense) handleTowerSelection(x, y int) bool {
+	iconSize := 60
+	padding := 10
+	startX := windowWidth - (iconSize + padding)
+	startY := windowHeight - (len(g.TowerImages)*(iconSize+padding) + padding)
+
+	for i := 0; i < len(g.TowerImages); i++ {
+		iconY := startY + i*(iconSize+padding)
+
+		if x >= startX && x <= startX+iconSize && y >= iconY && y <= iconY+iconSize {
+			g.SelectedTower = i
+			return true
+		}
+	}
+	return false
+}
+
+// placeTower places a tower at the specified position
+func (g *MythDefense) placeTower(x, y float64) {
+	if g.SelectedTower < 0 || g.SelectedTower >= len(g.TowerImages) {
+		return
+	}
+
+	// Center the tower image at the cursor position
+	imgBounds := g.TowerImages[g.SelectedTower].Bounds()
+	scale := 0.5
+	offsetX := float64(imgBounds.Dx()) * scale / 2
+	offsetY := float64(imgBounds.Dy()) * scale / 2
+
+	// Adjust position to center the tower at cursor
+	placementX := x - offsetX
+	placementY := y - offsetY
+
+	// Create tower with stats based on type
+	var tower *Towers
+	switch g.SelectedTower {
+	case 0: // Basic tower
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[0], TowerHealth: 100, Range: 100, Damage: 10, AttackSpeed: 1.0}
+	case 1: // Fast tower
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[1], TowerHealth: 80, Range: 120, Damage: 15, AttackSpeed: 1.5}
+	case 2: // Slow tower
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[2], TowerHealth: 80, Range: 90, Damage: 8, AttackSpeed: 0.5}
+	case 3: // Heavy tower
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[3], TowerHealth: 150, Range: 80, Damage: 25, AttackSpeed: 0.8}
+	case 4: // Heavy tower 2
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[4], TowerHealth: 150, Range: 80, Damage: 30, AttackSpeed: 0.7}
+	}
+
+	if tower != nil {
+		g.Towers = append(g.Towers, tower)
+	}
+}
+
 func UpdateEnemies(enemies []*Enemies, dt float64) {
 	for _, e := range enemies {
 		if e.Path == nil || e.PathIndex >= len(e.Path) {
@@ -176,14 +319,93 @@ func UpdateEnemies(enemies []*Enemies, dt float64) {
 	}
 }
 
+func UpdateTowers(towers []*Towers, enemies []*Enemies, frame_time float64) {
+	for _, tower := range towers {
+		if tower.Cooldown > 0 {
+			tower.Cooldown -= frame_time
+			continue
+
+		}
+		var closest *Enemies
+		minDistance := tower.Range
+		for _, e := range enemies {
+			dx := e.X - tower.X
+			dy := e.Y - tower.Y
+			distance := math.Hypot(dx, dy)
+			if distance <= minDistance {
+				closest = e
+				minDistance = distance
+			}
+		}
+		if closest != nil {
+			closest.Health -= tower.Damage
+			tower.Cooldown = 1.0 / tower.AttackSpeed
+		}
+	}
+}
+
 func (g *MythDefense) Update() error {
-	UpdateEnemies(g.Enemies, 1.0)
+	deltaTime := 1.0 // or calculate actual elapsed time per frame
+	UpdateEnemies(g.Enemies, deltaTime)
+	UpdateTowers(g.Towers, g.Enemies, deltaTime)
+
+	// Get current mouse state
+	x, y := ebiten.CursorPosition()
+	mousePressed := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+
+	// Update drag position every frame if dragging
+	if g.DraggingTower {
+		g.DragX = x
+		g.DragY = y
+	}
+
+	// Mouse button just pressed (transition from not pressed to pressed)
+	if mousePressed && !g.PrevMousePressed {
+		// Check if clicking on tower selection UI to start drag
+		if g.handleTowerSelection(x, y) {
+			g.DraggingTower = true
+			g.DragX = x
+			g.DragY = y
+		}
+	} else if !mousePressed && g.PrevMousePressed {
+		// Mouse button just released
+		if g.DraggingTower && g.SelectedTower >= 0 {
+			// Place tower at the EXACT drag position
+			g.placeTower(float64(g.DragX), float64(g.DragY))
+			g.DraggingTower = false
+			g.SelectedTower = -1 // Deselect after placing
+		}
+	}
+
+	g.PrevMousePressed = mousePressed
+
 	return nil
 }
 
 func (g *MythDefense) Draw(screen *ebiten.Image) {
 	drawTitleMap(screen)
 	drawEnemies(screen, g.Enemies)
+	drawTowers(screen, g.Towers)
+	drawTowerSelectionUI(screen, g)
+
+	// Draw dragging tower preview
+	if g.DraggingTower && g.SelectedTower >= 0 && g.SelectedTower < len(g.TowerImages) {
+		drawOpts := &ebiten.DrawImageOptions{}
+
+		// Make it semi-transparent
+		drawOpts.ColorScale.Scale(1, 1, 1, 0.6)
+
+		// Center the image on cursor - MUST match placeTower offset
+		imgBounds := g.TowerImages[g.SelectedTower].Bounds()
+		scale := 0.5
+		offsetX := float64(imgBounds.Dx()) * scale / 2
+		offsetY := float64(imgBounds.Dy()) * scale / 2
+
+		drawOpts.GeoM.Scale(scale, scale)
+		drawOpts.GeoM.Translate(float64(g.DragX)-offsetX, float64(g.DragY)-offsetY)
+
+		screen.DrawImage(g.TowerImages[g.SelectedTower], drawOpts)
+	}
 }
 
 func loadTiles(mapData *tiled.Map) map[uint32]*ebiten.Image {
@@ -315,11 +537,42 @@ func main() {
 		enemies = append(enemies, &Enemies{X: 0, Y: 200, Img: enemyImages[4], Type: "basic", Speed: 1.0, Health: 80, Path: path, PathIndex: 0})
 	}
 
-	towerImagePaths := []string{"asset/basic_tower.png", "asset/fast_tower.png", "asset/slow_tower.png", "asset/heavy_tower.png", "asset/heavy2_tower.png"}
+	towerImagePaths := []string{
+		"asset/basic_tower.png",
+		"asset/fast_tower.png",
+		"asset/slow_tower.png",
+		"asset/heavy_tower.jpg",
+		"asset/heavy_tower2.png"}
 
+	// Initialize towerImages first
+	towerImages := []*ebiten.Image{}
+
+	// Load tower images
+	for _, path := range towerImagePaths {
+		data, err := assetsFS.ReadFile(path)
+		if err != nil {
+			println("Failed to read tower image:", path, err.Error())
+			continue
+		}
+		img, _, err := ebitenutil.NewImageFromReader(bytes.NewReader(data))
+		if err != nil {
+			println("Failed to decode tower image:", path, err.Error())
+			continue
+		}
+		towerImages = append(towerImages, img)
+	}
+
+	// Initialize towers only once
 	towers := []*Towers{}
-	// Only create towers if we have the images loaded
-	if len(towerImages) >= 1 {
+
+	mythGame := &MythDefense{
+		Enemies:          enemies,
+		Towers:           towers,
+		TowerImages:      towerImages,
+		SelectedTower:    -1, // No tower selected initially
+		DraggingTower:    false,
+		PrevMousePressed: false,
+	}
 
 	ebiten.SetWindowSize(windowWidth, windowHeight)
 	ebiten.SetWindowTitle("Myth Defense - Title Screen")
