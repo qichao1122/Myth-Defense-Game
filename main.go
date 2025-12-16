@@ -34,12 +34,16 @@ var (
 
 type MythDefense struct {
 	Enemies          []*Enemies
+	EnemyImage       []*ebiten.Image
 	Towers           []*Towers
 	TowerImages      []*ebiten.Image // Available tower types
 	SelectedTower    int             // Index of selected tower (-1 = none)
 	DraggingTower    bool            // Whether currently dragging a tower
 	DragX, DragY     int             // Current drag position
 	PrevMousePressed bool            // Previous frame mouse state
+
+	SpawnTimer    float64
+	SpawnInterval float64
 }
 
 type Enemies struct {
@@ -50,6 +54,8 @@ type Enemies struct {
 	Path      []Node // A* path
 	PathIndex int
 	Health    int
+	MaxHealth int
+	Scale     float64
 }
 
 type Towers struct {
@@ -61,6 +67,7 @@ type Towers struct {
 	AttackSpeed float64       // Attacks per second
 	Cooldown    float64       // Time until next attack
 	Target      *Enemies      // Current enemy target
+	MaxHealth   int
 }
 
 type Node struct {
@@ -166,9 +173,50 @@ func drawEnemies(screen *ebiten.Image, enemies []*Enemies) {
 			continue
 		}
 		drawOpts := &ebiten.DrawImageOptions{}
+		drawOpts.GeoM.Scale(enemy.Scale, enemy.Scale)
 		drawOpts.GeoM.Translate(enemy.X, enemy.Y)
 		screen.DrawImage(enemy.Img, drawOpts)
+
+		// Draw health bar
+		drawEnemyHealthBar(screen, enemy)
 	}
+}
+
+func drawEnemyHealthBar(screen *ebiten.Image, e *Enemies) {
+	if e.MaxHealth <= 0 {
+		return
+	}
+
+	barWidth := 32.0
+	barHeight := 4.0
+
+	healthRatio := float64(e.Health) / float64(e.MaxHealth)
+	if healthRatio < 0 {
+		healthRatio = 0
+	}
+
+	x := e.X
+	y := e.Y - 6 // draw slightly above enemy
+
+	// Background (red)
+	ebitenutil.DrawRect(
+		screen,
+		x,
+		y,
+		barWidth,
+		barHeight,
+		color.RGBA{200, 0, 0, 255},
+	)
+
+	// Foreground (green)
+	ebitenutil.DrawRect(
+		screen,
+		x,
+		y,
+		barWidth*healthRatio,
+		barHeight,
+		color.RGBA{0, 200, 0, 255},
+	)
 }
 
 func drawTowers(screen *ebiten.Image, towers []*Towers) {
@@ -178,8 +226,43 @@ func drawTowers(screen *ebiten.Image, towers []*Towers) {
 			drawOpts.GeoM.Scale(0.5, 0.5)             // Scale FIRST
 			drawOpts.GeoM.Translate(tower.X, tower.Y) // Then translate
 			screen.DrawImage(tower.Img, drawOpts)
+
+			drawTowerHealthBar(screen, tower)
 		}
 	}
+}
+
+func drawTowerHealthBar(screen *ebiten.Image, t *Towers) {
+	barWidth := 32
+	barHeight := 4
+
+	ratio := float64(t.TowerHealth) / float64(t.MaxHealth)
+	if ratio < 0 {
+		ratio = 0
+	}
+
+	x := int(t.X)
+	y := int(t.Y) - 6 // above tower
+
+	// Background (red)
+	ebitenutil.DrawRect(
+		screen,
+		float64(x),
+		float64(y),
+		float64(barWidth),
+		float64(barHeight),
+		color.RGBA{255, 0, 0, 255},
+	)
+
+	// Foreground (green)
+	ebitenutil.DrawRect(
+		screen,
+		float64(x),
+		float64(y),
+		float64(barWidth)*ratio,
+		float64(barHeight),
+		color.RGBA{0, 255, 0, 255},
+	)
 }
 
 // drawTowerSelectionUI draws the tower selection panel in the bottom-right
@@ -319,6 +402,26 @@ func UpdateEnemies(enemies []*Enemies, dt float64) {
 	}
 }
 
+func spawnEnemy(g *MythDefense, path []Node, enemyImages []*ebiten.Image) {
+	if len(enemyImages) == 0 {
+		return
+	}
+
+	enemy := &Enemies{
+		X:         0,
+		Y:         0,
+		Img:       enemyImages[0], // basic enemy for now
+		Type:      "basic",
+		Speed:     1.2,
+		Health:    100,
+		MaxHealth: 100,
+		Path:      path,
+		PathIndex: 0,
+	}
+
+	g.Enemies = append(g.Enemies, enemy)
+}
+
 func UpdateTowers(towers []*Towers, enemies []*Enemies, frame_time float64) {
 	for _, tower := range towers {
 		if tower.Cooldown > 0 {
@@ -348,6 +451,17 @@ func (g *MythDefense) Update() error {
 	deltaTime := 1.0 // or calculate actual elapsed time per frame
 	UpdateEnemies(g.Enemies, deltaTime)
 	UpdateTowers(g.Towers, g.Enemies, deltaTime)
+
+	// === Enemy spawn timer ===
+	g.SpawnTimer += deltaTime
+	if g.SpawnTimer >= g.SpawnInterval {
+		g.SpawnTimer = 0
+
+		// Reuse existing path
+		if len(g.Enemies) > 0 {
+			spawnEnemy(g, g.Enemies[0].Path, g.EnemyImage)
+		}
+	}
 
 	// Get current mouse state
 	x, y := ebiten.CursorPosition()
@@ -522,19 +636,19 @@ func main() {
 
 	enemies := []*Enemies{}
 	if len(enemyImages) >= 1 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 0, Img: enemyImages[0], Type: "fast", Speed: 2.0, Health: 100, Path: path, PathIndex: 0})
+		enemies = append(enemies, &Enemies{X: 0, Y: 0, Img: enemyImages[0], Type: "fast", Speed: 2.0, Health: 100, MaxHealth: 100, Path: path, PathIndex: 0, Scale: 0.3})
 	}
 	if len(enemyImages) >= 2 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 50, Img: enemyImages[1], Type: "slow", Speed: 0.8, Health: 120, Path: path, PathIndex: 0})
+		enemies = append(enemies, &Enemies{X: 0, Y: 50, Img: enemyImages[1], Type: "slow", Speed: 0.8, Health: 120, MaxHealth: 120, Path: path, PathIndex: 0, Scale: 0.5})
 	}
 	if len(enemyImages) >= 3 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 100, Img: enemyImages[2], Type: "resistant", Speed: 1.2, Health: 150, Path: path, PathIndex: 0})
+		enemies = append(enemies, &Enemies{X: 0, Y: 100, Img: enemyImages[2], Type: "resistant", Speed: 1.2, Health: 150, MaxHealth: 150, Path: path, PathIndex: 0, Scale: 0.5})
 	}
 	if len(enemyImages) >= 4 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 150, Img: enemyImages[3], Type: "special", Speed: 1.5, Health: 200, Path: path, PathIndex: 0})
+		enemies = append(enemies, &Enemies{X: 0, Y: 150, Img: enemyImages[3], Type: "special", Speed: 1.5, Health: 200, MaxHealth: 200, Path: path, PathIndex: 0, Scale: 0.5})
 	}
 	if len(enemyImages) >= 5 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 200, Img: enemyImages[4], Type: "basic", Speed: 1.0, Health: 80, Path: path, PathIndex: 0})
+		enemies = append(enemies, &Enemies{X: 0, Y: 200, Img: enemyImages[4], Type: "basic", Speed: 1.0, Health: 80, MaxHealth: 80, Path: path, PathIndex: 0, Scale: 0.5})
 	}
 
 	towerImagePaths := []string{
@@ -559,6 +673,7 @@ func main() {
 			println("Failed to decode tower image:", path, err.Error())
 			continue
 		}
+
 		towerImages = append(towerImages, img)
 	}
 
@@ -567,11 +682,15 @@ func main() {
 
 	mythGame := &MythDefense{
 		Enemies:          enemies,
+		EnemyImage:       enemyImages,
 		Towers:           towers,
 		TowerImages:      towerImages,
 		SelectedTower:    -1, // No tower selected initially
 		DraggingTower:    false,
 		PrevMousePressed: false,
+
+		SpawnTimer:    0.0,
+		SpawnInterval: 60.0,
 	}
 
 	ebiten.SetWindowSize(windowWidth, windowHeight)
