@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"embed"
+	"fmt"
 	"image"
 	"image/color"
 	_ "image/jpeg"
@@ -35,15 +36,33 @@ var (
 type MythDefense struct {
 	Enemies          []*Enemies
 	EnemyImage       []*ebiten.Image
+	Base             *Base
 	Towers           []*Towers
-	TowerImages      []*ebiten.Image // Available tower types
-	SelectedTower    int             // Index of selected tower (-1 = none)
-	DraggingTower    bool            // Whether currently dragging a tower
-	DragX, DragY     int             // Current drag position
-	PrevMousePressed bool            // Previous frame mouse state
+	TowerImages      []*ebiten.Image          // Available tower types
+	BulletImages     map[string]*ebiten.Image // Bullet images by type
+	Bullets          []*Bullet                // Active bullets
+	SelectedTower    int                      // Index of selected tower (-1 = none)
+	DraggingTower    bool                     // Whether currently dragging a tower
+	DragX, DragY     int                      // Current drag position
+	PrevMousePressed bool                     // Previous frame mouse state
 
 	SpawnTimer    float64
 	SpawnInterval float64
+	GameTimer     float64 // Total game time elapsed
+	GameDuration  float64 // Total game duration (2 minutes = 120 seconds)
+	GameOver      bool    // Game over flag
+	GameWon       bool    // Whether player won or lost
+	CurrentMap    int     // Current map index (0, 1, or 2)
+	AllMaps       []*tiled.Map
+	AllTiles      []map[uint32]*ebiten.Image
+	EnemyPath     []Node // Store the path for spawning
+
+	// Coin system
+	Coins     int           // Current number of coins
+	CoinImage *ebiten.Image // Coin icon
+
+	// Pathfinding grid
+	Grid [][]int // Grid for pathfinding (0 = walkable, 1 = blocked)
 }
 
 type Enemies struct {
@@ -56,6 +75,11 @@ type Enemies struct {
 	Health    int
 	MaxHealth int
 	Scale     float64
+
+	// Slow effect
+	BaseSpeed      float64 // Original speed
+	SlowDuration   float64 // Time remaining for slow effect
+	SlowMultiplier float64 // Speed multiplier when slowed (e.g., 0.5 = 50% speed)
 }
 
 type Towers struct {
@@ -68,6 +92,26 @@ type Towers struct {
 	Cooldown    float64       // Time until next attack
 	Target      *Enemies      // Current enemy target
 	MaxHealth   int
+	BulletType  string // Type of bullet this tower shoots
+}
+
+type Base struct {
+	X, Y       float64
+	BaseImgage *ebiten.Image
+	BaseHealth int
+	MaxHealth  int
+}
+
+type Bullet struct {
+	X, Y       float64
+	TargetX    float64
+	TargetY    float64
+	Speed      float64
+	Damage     int
+	Img        *ebiten.Image
+	Target     *Enemies
+	Active     bool
+	BulletType string // Track bullet type for special effects
 }
 
 type Node struct {
@@ -226,60 +270,31 @@ func drawTowers(screen *ebiten.Image, towers []*Towers) {
 			drawOpts.GeoM.Scale(0.5, 0.5)             // Scale FIRST
 			drawOpts.GeoM.Translate(tower.X, tower.Y) // Then translate
 			screen.DrawImage(tower.Img, drawOpts)
-
-			drawTowerHealthBar(screen, tower)
 		}
 	}
 }
 
-func drawTowerHealthBar(screen *ebiten.Image, t *Towers) {
-	barWidth := 32
-	barHeight := 4
-
-	ratio := float64(t.TowerHealth) / float64(t.MaxHealth)
-	if ratio < 0 {
-		ratio = 0
-	}
-
-	x := int(t.X)
-	y := int(t.Y) - 6 // above tower
-
-	// Background (red)
-	ebitenutil.DrawRect(
-		screen,
-		float64(x),
-		float64(y),
-		float64(barWidth),
-		float64(barHeight),
-		color.RGBA{255, 0, 0, 255},
-	)
-
-	// Foreground (green)
-	ebitenutil.DrawRect(
-		screen,
-		float64(x),
-		float64(y),
-		float64(barWidth)*ratio,
-		float64(barHeight),
-		color.RGBA{0, 255, 0, 255},
-	)
-}
-
-// drawTowerSelectionUI draws the tower selection panel in the bottom-right
+// drawTowerSelectionUI draws the tower selection panel in the bottom-left
 func drawTowerSelectionUI(screen *ebiten.Image, game *MythDefense) {
 	if len(game.TowerImages) == 0 {
 		return
 	}
 
+	// Tower costs
+	towerCosts := []int{15, 10, 20, 25, 25} // basic, fast, slow, heavy, heavy2
+
 	// UI settings
 	iconSize := 60
 	padding := 10
-	startX := windowWidth - (iconSize + padding)
+	startX := padding // Left side
 	startY := windowHeight - (len(game.TowerImages)*(iconSize+padding) + padding)
 
 	// Draw background panel
 	for i := 0; i < len(game.TowerImages); i++ {
 		y := startY + i*(iconSize+padding)
+
+		// Check if player can afford this tower
+		canAfford := i < len(towerCosts) && game.Coins >= towerCosts[i]
 
 		// Draw selection highlight (yellow background)
 		if i == game.SelectedTower {
@@ -303,6 +318,12 @@ func drawTowerSelectionUI(screen *ebiten.Image, game *MythDefense) {
 
 			drawOpts.GeoM.Scale(scale, scale)
 			drawOpts.GeoM.Translate(float64(startX), float64(y))
+
+			// Gray out if can't afford
+			if !canAfford {
+				drawOpts.ColorScale.Scale(0.5, 0.5, 0.5, 1.0)
+			}
+
 			screen.DrawImage(game.TowerImages[i], drawOpts)
 		}
 
@@ -321,22 +342,45 @@ func drawTowerSelectionUI(screen *ebiten.Image, game *MythDefense) {
 		// Right
 		ebitenutil.DrawRect(screen, float64(startX+iconSize)-borderThickness, float64(y),
 			borderThickness, float64(iconSize), borderColor)
+
+		// Draw cost text
+		if i < len(towerCosts) {
+			costText := fmt.Sprintf("%d", towerCosts[i])
+			ebitenutil.DebugPrintAt(screen, costText, startX+iconSize+5, y+iconSize/2)
+
+			// Draw coin icon next to cost
+			if game.CoinImage != nil {
+				coinOpts := &ebiten.DrawImageOptions{}
+				coinScale := 0.15
+				coinOpts.GeoM.Scale(coinScale, coinScale)
+				coinOpts.GeoM.Translate(float64(startX+iconSize+25), float64(y+iconSize/2-5))
+				screen.DrawImage(game.CoinImage, coinOpts)
+			}
+		}
 	}
 }
 
 // handleTowerSelection checks if mouse click is on tower selection UI
 func (g *MythDefense) handleTowerSelection(x, y int) bool {
+	// Tower costs
+	towerCosts := []int{15, 10, 20, 25, 25} // basic, fast, slow, heavy, heavy2
+
 	iconSize := 60
 	padding := 10
-	startX := windowWidth - (iconSize + padding)
+	startX := padding // Left side
 	startY := windowHeight - (len(g.TowerImages)*(iconSize+padding) + padding)
 
 	for i := 0; i < len(g.TowerImages); i++ {
 		iconY := startY + i*(iconSize+padding)
 
 		if x >= startX && x <= startX+iconSize && y >= iconY && y <= iconY+iconSize {
-			g.SelectedTower = i
-			return true
+			// Check if player can afford this tower
+			if i < len(towerCosts) && g.Coins >= towerCosts[i] {
+				g.SelectedTower = i
+				return true
+			}
+			// If can't afford, don't select
+			return false
 		}
 	}
 	return false
@@ -345,6 +389,14 @@ func (g *MythDefense) handleTowerSelection(x, y int) bool {
 // placeTower places a tower at the specified position
 func (g *MythDefense) placeTower(x, y float64) {
 	if g.SelectedTower < 0 || g.SelectedTower >= len(g.TowerImages) {
+		return
+	}
+
+	// Tower costs
+	towerCosts := []int{15, 10, 20, 25, 25} // basic, fast, slow, heavy, heavy2
+
+	// Check if player can afford the tower
+	if g.SelectedTower >= len(towerCosts) || g.Coins < towerCosts[g.SelectedTower] {
 		return
 	}
 
@@ -362,24 +414,63 @@ func (g *MythDefense) placeTower(x, y float64) {
 	var tower *Towers
 	switch g.SelectedTower {
 	case 0: // Basic tower
-		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[0], TowerHealth: 100, Range: 100, Damage: 10, AttackSpeed: 1.0}
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[0], TowerHealth: 100, MaxHealth: 100, Range: 100, Damage: 10, AttackSpeed: 1.0, BulletType: "basic"}
 	case 1: // Fast tower
-		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[1], TowerHealth: 80, Range: 120, Damage: 15, AttackSpeed: 1.5}
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[1], TowerHealth: 80, MaxHealth: 80, Range: 120, Damage: 15, AttackSpeed: 1.5, BulletType: "fast"}
 	case 2: // Slow tower
-		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[2], TowerHealth: 80, Range: 90, Damage: 8, AttackSpeed: 0.5}
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[2], TowerHealth: 80, MaxHealth: 80, Range: 90, Damage: 8, AttackSpeed: 0.5, BulletType: "slow"}
 	case 3: // Heavy tower
-		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[3], TowerHealth: 150, Range: 80, Damage: 25, AttackSpeed: 0.8}
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[3], TowerHealth: 150, MaxHealth: 150, Range: 80, Damage: 25, AttackSpeed: 0.8, BulletType: "heavy"}
 	case 4: // Heavy tower 2
-		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[4], TowerHealth: 150, Range: 80, Damage: 30, AttackSpeed: 0.7}
+		tower = &Towers{X: placementX, Y: placementY, Img: g.TowerImages[4], TowerHealth: 150, MaxHealth: 150, Range: 80, Damage: 30, AttackSpeed: 0.7, BulletType: "heavy"}
 	}
 
 	if tower != nil {
 		g.Towers = append(g.Towers, tower)
+		// Deduct cost
+		g.Coins -= towerCosts[g.SelectedTower]
+
+		// Update grid and recalculate paths for enemies
+		g.updateGridWithTowers()
+		g.recalculateEnemyPaths()
+	}
+}
+
+func drawBase(screen *ebiten.Image, base *Base) {
+	if base == nil || base.BaseImgage == nil {
+		return
+	}
+
+	drawOpts := &ebiten.DrawImageOptions{}
+	drawOpts.GeoM.Scale(0.5, 0.5) // Add scale to make base visible
+	drawOpts.GeoM.Translate(base.X, base.Y)
+	screen.DrawImage(base.BaseImgage, drawOpts)
+
+}
+
+func drawBullets(screen *ebiten.Image, bullets []*Bullet) {
+	for _, bullet := range bullets {
+		if !bullet.Active || bullet.Img == nil {
+			continue
+		}
+		drawOpts := &ebiten.DrawImageOptions{}
+		drawOpts.GeoM.Scale(0.5, 0.5) // Increase scale to make bullets more visible
+		drawOpts.GeoM.Translate(bullet.X, bullet.Y)
+		screen.DrawImage(bullet.Img, drawOpts)
 	}
 }
 
 func UpdateEnemies(enemies []*Enemies, dt float64) {
 	for _, e := range enemies {
+		// Update slow effect
+		if e.SlowDuration > 0 {
+			e.SlowDuration -= dt
+			if e.SlowDuration <= 0 {
+				// Slow effect expired, restore original speed
+				e.Speed = e.BaseSpeed
+			}
+		}
+
 		if e.Path == nil || e.PathIndex >= len(e.Path) {
 			continue
 		}
@@ -407,60 +498,242 @@ func spawnEnemy(g *MythDefense, path []Node, enemyImages []*ebiten.Image) {
 		return
 	}
 
-	enemy := &Enemies{
-		X:         0,
-		Y:         0,
-		Img:       enemyImages[0], // basic enemy for now
-		Type:      "basic",
-		Speed:     1.2,
-		Health:    100,
-		MaxHealth: 100,
-		Path:      path,
-		PathIndex: 0,
+	// Spawn one of each enemy type at each interval
+	enemyTypes := []struct {
+		imgIndex  int
+		typeName  string
+		speed     float64
+		health    int
+		maxHealth int
+		scale     float64
+	}{
+		{0, "fast", 120.0, 100, 100, 0.25},
+		{1, "slow", 48.0, 120, 120, 0.5},
+		{2, "resistant", 72.0, 150, 150, 0.5},
+		{3, "special", 90.0, 200, 200, 0.5},
 	}
 
-	g.Enemies = append(g.Enemies, enemy)
+	for _, et := range enemyTypes {
+		if et.imgIndex >= len(enemyImages) {
+			continue
+		}
+
+		enemy := &Enemies{
+			X:              0,
+			Y:              0,
+			Img:            enemyImages[et.imgIndex],
+			Type:           et.typeName,
+			Speed:          et.speed,
+			BaseSpeed:      et.speed, // Store original speed
+			Health:         et.health,
+			MaxHealth:      et.maxHealth,
+			Path:           path,
+			PathIndex:      0,
+			Scale:          et.scale,
+			SlowDuration:   0.0,
+			SlowMultiplier: 1.0,
+		}
+
+		g.Enemies = append(g.Enemies, enemy)
+	}
 }
 
-func UpdateTowers(towers []*Towers, enemies []*Enemies, frame_time float64) {
+func UpdateBullets(bullets []*Bullet, enemies []*Enemies, dt float64) {
+	for i := len(bullets) - 1; i >= 0; i-- {
+		bullet := bullets[i]
+		if !bullet.Active {
+			continue
+		}
+
+		// Check if target enemy still exists and is alive
+		targetAlive := false
+		if bullet.Target != nil {
+			for _, e := range enemies {
+				if e == bullet.Target && e.Health > 0 {
+					targetAlive = true
+					// Update target position
+					bullet.TargetX = e.X + 16 // Center of enemy
+					bullet.TargetY = e.Y + 16
+					break
+				}
+			}
+		}
+
+		// If target is dead, deactivate bullet
+		if !targetAlive {
+			bullet.Active = false
+			continue
+		}
+
+		// Move bullet towards target
+		dx := bullet.TargetX - bullet.X
+		dy := bullet.TargetY - bullet.Y
+		distance := math.Hypot(dx, dy)
+
+		// Check if bullet reached target
+		if distance < bullet.Speed*dt {
+			// Hit the target
+			if bullet.Target != nil {
+				bullet.Target.Health -= bullet.Damage
+
+				// Apply slow effect if this is a slow bullet
+				if bullet.BulletType == "slow" {
+					bullet.Target.SlowDuration = 5.0   // Slow for 5 seconds
+					bullet.Target.SlowMultiplier = 0.5 // 50% speed
+					bullet.Target.Speed = bullet.Target.BaseSpeed * bullet.Target.SlowMultiplier
+				}
+			}
+			bullet.Active = false
+		} else {
+			// Move bullet
+			bullet.X += (dx / distance) * bullet.Speed * dt
+			bullet.Y += (dy / distance) * bullet.Speed * dt
+		}
+	}
+}
+
+func UpdateTowers(towers []*Towers, enemies []*Enemies, bullets *[]*Bullet, bulletImages map[string]*ebiten.Image, frame_time float64) {
 	for _, tower := range towers {
+		// Always decrease cooldown
 		if tower.Cooldown > 0 {
 			tower.Cooldown -= frame_time
-			continue
-
 		}
+
+		// Only shoot if cooldown is finished
+		if tower.Cooldown > 0 {
+			continue
+		}
+
+		// Find closest enemy in range
 		var closest *Enemies
 		minDistance := tower.Range
 		for _, e := range enemies {
-			dx := e.X - tower.X
-			dy := e.Y - tower.Y
+			if e.Health <= 0 {
+				continue
+			}
+
+			// Calculate distance from tower center
+			towerCenterX := tower.X + 16 // Approximate tower center
+			towerCenterY := tower.Y + 16
+
+			dx := e.X - towerCenterX
+			dy := e.Y - towerCenterY
 			distance := math.Hypot(dx, dy)
+
 			if distance <= minDistance {
 				closest = e
 				minDistance = distance
 			}
 		}
+
+		// If enemy found, shoot bullet
 		if closest != nil {
-			closest.Health -= tower.Damage
+			bulletImg := bulletImages[tower.BulletType]
+			if bulletImg != nil {
+				towerCenterX := tower.X + 16
+				towerCenterY := tower.Y + 16
+
+				// Determine bullet speed based on type
+				var bulletSpeed float64
+				switch tower.BulletType {
+				case "fast":
+					bulletSpeed = 300.0
+				case "slow":
+					bulletSpeed = 120.0
+				case "heavy":
+					bulletSpeed = 180.0
+				case "basic":
+					bulletSpeed = 240.0
+				default:
+					bulletSpeed = 240.0
+				}
+
+				bullet := &Bullet{
+					X:          towerCenterX,
+					Y:          towerCenterY,
+					TargetX:    closest.X + 16,
+					TargetY:    closest.Y + 16,
+					Speed:      bulletSpeed,
+					Damage:     tower.Damage,
+					Img:        bulletImg,
+					Target:     closest,
+					Active:     true,
+					BulletType: tower.BulletType, // Track bullet type
+				}
+				*bullets = append(*bullets, bullet)
+			}
+			// Reset cooldown after shooting
 			tower.Cooldown = 1.0 / tower.AttackSpeed
 		}
 	}
 }
 
 func (g *MythDefense) Update() error {
-	deltaTime := 1.0 // or calculate actual elapsed time per frame
+	// Check if game is over
+	if g.GameOver {
+		// Check for space key to proceed to next map after winning
+		if g.GameWon && ebiten.IsKeyPressed(ebiten.KeySpace) {
+			g.loadNextMap()
+		}
+		return nil // Stop updating if game is over
+	}
+
+	deltaTime := 1.0 / 60.0 // Proper frame time (assuming 60 FPS)
 	UpdateEnemies(g.Enemies, deltaTime)
-	UpdateTowers(g.Towers, g.Enemies, deltaTime)
+	UpdateTowers(g.Towers, g.Enemies, &g.Bullets, g.BulletImages, deltaTime)
+	UpdateBullets(g.Bullets, g.Enemies, deltaTime)
+
+	// Check if any enemy reached the base
+	if g.Base != nil {
+		for _, e := range g.Enemies {
+			if e.Path != nil && e.PathIndex >= len(e.Path) {
+				// Enemy reached the end of path (base location)
+				g.GameOver = true
+				g.GameWon = false
+				return nil
+			}
+		}
+	}
+
+	// Remove dead enemies and award coins
+	aliveEnemies := []*Enemies{}
+	for _, e := range g.Enemies {
+		if e.Health > 0 {
+			aliveEnemies = append(aliveEnemies, e)
+		} else {
+			// Enemy died - award 10 coins
+			g.Coins += 10
+		}
+	}
+	g.Enemies = aliveEnemies
+
+	// Remove inactive bullets
+	activeBullets := []*Bullet{}
+	for _, b := range g.Bullets {
+		if b.Active {
+			activeBullets = append(activeBullets, b)
+		}
+	}
+	g.Bullets = activeBullets
 
 	// === Enemy spawn timer ===
 	g.SpawnTimer += deltaTime
 	if g.SpawnTimer >= g.SpawnInterval {
-		g.SpawnTimer = 0
+		g.SpawnTimer -= g.SpawnInterval // Subtract interval instead of resetting to 0
 
-		// Reuse existing path
-		if len(g.Enemies) > 0 {
-			spawnEnemy(g, g.Enemies[0].Path, g.EnemyImage)
+		// Spawn all enemy types at once using the stored path
+		if len(g.EnemyImage) > 0 && g.EnemyPath != nil && len(g.EnemyPath) > 0 {
+			spawnEnemy(g, g.EnemyPath, g.EnemyImage)
 		}
+	}
+
+	// === Game timer ===
+	g.GameTimer += deltaTime
+	if g.GameTimer >= g.GameDuration {
+		// Game over - time's up! Player survived
+		g.GameOver = true
+		g.GameWon = true
+		return nil
 	}
 
 	// Get current mouse state
@@ -498,9 +771,58 @@ func (g *MythDefense) Update() error {
 
 func (g *MythDefense) Draw(screen *ebiten.Image) {
 	drawTitleMap(screen)
+	drawBase(screen, g.Base) // Draw base before enemies and towers so it's visible
 	drawEnemies(screen, g.Enemies)
 	drawTowers(screen, g.Towers)
+	drawBullets(screen, g.Bullets)
 	drawTowerSelectionUI(screen, g)
+
+	// Draw coin counter in top-right corner
+	coinText := fmt.Sprintf("Coins: %d", g.Coins)
+	ebitenutil.DebugPrintAt(screen, coinText, windowWidth-120, 10)
+
+	// Draw coin icon next to counter
+	if g.CoinImage != nil {
+		coinOpts := &ebiten.DrawImageOptions{}
+		coinScale := 0.2
+		coinOpts.GeoM.Scale(coinScale, coinScale)
+		coinOpts.GeoM.Translate(float64(windowWidth-135), 8)
+		screen.DrawImage(g.CoinImage, coinOpts)
+	}
+
+	// Draw game timer
+	remainingTime := g.GameDuration - g.GameTimer
+	if remainingTime < 0 {
+		remainingTime = 0
+	}
+	minutes := int(remainingTime) / 60
+	seconds := int(remainingTime) % 60
+	timerText := fmt.Sprintf("Time: %02d:%02d", minutes, seconds)
+	ebitenutil.DebugPrintAt(screen, timerText, 10, 10)
+
+	// Draw current map indicator
+	mapText := fmt.Sprintf("Map: %d/%d", g.CurrentMap+1, len(g.AllMaps))
+	ebitenutil.DebugPrintAt(screen, mapText, 10, 30)
+
+	// Draw game over message
+	if g.GameOver {
+		// Draw semi-transparent overlay
+		ebitenutil.DrawRect(screen, 0, 0, float64(windowWidth), float64(windowHeight),
+			color.RGBA{0, 0, 0, 180})
+
+		// Draw game over text
+		var message string
+		if g.GameWon {
+			if g.CurrentMap+1 >= len(g.AllMaps) {
+				message = "CONGRATULATIONS!\nYou completed all maps!"
+			} else {
+				message = fmt.Sprintf("YOU WON!\nYou survived map %d!\n\nPress SPACE for next map", g.CurrentMap+1)
+			}
+		} else {
+			message = "GAME OVER!\nEnemies reached your base!"
+		}
+		ebitenutil.DebugPrintAt(screen, message, windowWidth/2-100, windowHeight/2)
+	}
 
 	// Draw dragging tower preview
 	if g.DraggingTower && g.SelectedTower >= 0 && g.SelectedTower < len(g.TowerImages) {
@@ -597,6 +919,30 @@ func main() {
 		titleTileImages = tiles[0]
 	}
 
+	// Load coin image
+	var coinImage *ebiten.Image
+	coinImgData, err := assetsFS.ReadFile("asset/coin.png")
+	if err != nil {
+		println("Failed to read coin image:", err.Error())
+	} else {
+		coinImage, _, err = ebitenutil.NewImageFromReader(bytes.NewReader(coinImgData))
+		if err != nil {
+			println("Failed to decode coin image:", err.Error())
+		}
+	}
+
+	// Load base image with error handling
+	var baseImage *ebiten.Image
+	baseImgData, err := assetsFS.ReadFile("asset/castle.png")
+	if err != nil {
+		println("Failed to read base image:", err.Error())
+	} else {
+		baseImage, _, err = ebitenutil.NewImageFromReader(bytes.NewReader(baseImgData))
+		if err != nil {
+			println("Failed to decode base image:", err.Error())
+		}
+	}
+
 	enemyPaths := []string{
 		"asset/fast_enemy.png",
 		"asset/slow_enemy.png",
@@ -634,29 +980,15 @@ func main() {
 		path = []Node{{X: 0, Y: 0}, {X: 10, Y: 10}, {X: 20, Y: 20}}
 	}
 
+	// Start with no enemies - they will spawn during gameplay
 	enemies := []*Enemies{}
-	if len(enemyImages) >= 1 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 0, Img: enemyImages[0], Type: "fast", Speed: 2.0, Health: 100, MaxHealth: 100, Path: path, PathIndex: 0, Scale: 0.3})
-	}
-	if len(enemyImages) >= 2 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 50, Img: enemyImages[1], Type: "slow", Speed: 0.8, Health: 120, MaxHealth: 120, Path: path, PathIndex: 0, Scale: 0.5})
-	}
-	if len(enemyImages) >= 3 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 100, Img: enemyImages[2], Type: "resistant", Speed: 1.2, Health: 150, MaxHealth: 150, Path: path, PathIndex: 0, Scale: 0.5})
-	}
-	if len(enemyImages) >= 4 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 150, Img: enemyImages[3], Type: "special", Speed: 1.5, Health: 200, MaxHealth: 200, Path: path, PathIndex: 0, Scale: 0.5})
-	}
-	if len(enemyImages) >= 5 {
-		enemies = append(enemies, &Enemies{X: 0, Y: 200, Img: enemyImages[4], Type: "basic", Speed: 1.0, Health: 80, MaxHealth: 80, Path: path, PathIndex: 0, Scale: 0.5})
-	}
 
 	towerImagePaths := []string{
 		"asset/basic_tower.png",
 		"asset/fast_tower.png",
 		"asset/slow_tower.png",
 		"asset/heavy_tower.jpg",
-		"asset/heavy_tower2.png"}
+	}
 
 	// Initialize towerImages first
 	towerImages := []*ebiten.Image{}
@@ -677,23 +1009,187 @@ func main() {
 		towerImages = append(towerImages, img)
 	}
 
+	// Load bullet images
+	bulletImagePaths := map[string]string{
+		"basic": "asset/basic_bullet.png",
+		"fast":  "asset/fast_bullet.png",
+		"slow":  "asset/slow_bullet.png",
+		"heavy": "asset/heavy_bullet.png",
+	}
+
+	bulletImages := make(map[string]*ebiten.Image)
+	for bulletType, path := range bulletImagePaths {
+		data, err := assetsFS.ReadFile(path)
+		if err != nil {
+			println("Failed to read bullet image:", path, err.Error())
+			continue
+		}
+		img, _, err := ebitenutil.NewImageFromReader(bytes.NewReader(data))
+		if err != nil {
+			println("Failed to decode bullet image:", path, err.Error())
+			continue
+		}
+		bulletImages[bulletType] = img
+	}
+
 	// Initialize towers only once
 	towers := []*Towers{}
+
+	// Calculate base position - bottom right corner
+	// Account for the base image size and scale
+	var baseWidth, baseHeight float64
+	if baseImage != nil {
+		bounds := baseImage.Bounds()
+		baseWidth = float64(bounds.Dx()) * 0.5  // scaled size
+		baseHeight = float64(bounds.Dy()) * 0.5 // scaled size
+	}
+
+	base := &Base{
+		X:          float64(windowWidth) - baseWidth - 10,   // 10 pixels from right edge
+		Y:          float64(windowHeight) - baseHeight - 10, // 10 pixels from bottom edge
+		BaseImgage: baseImage,
+		BaseHealth: 500,
+		MaxHealth:  500,
+	}
 
 	mythGame := &MythDefense{
 		Enemies:          enemies,
 		EnemyImage:       enemyImages,
 		Towers:           towers,
 		TowerImages:      towerImages,
+		BulletImages:     bulletImages,
+		Bullets:          []*Bullet{},
 		SelectedTower:    -1, // No tower selected initially
 		DraggingTower:    false,
 		PrevMousePressed: false,
 
-		SpawnTimer:    0.0,
-		SpawnInterval: 60.0,
+		SpawnTimer:    10.0, // Start at 10.0 so enemies spawn immediately on first frame
+		SpawnInterval: 10.0, // Spawn every 10 seconds
+		GameTimer:     0.0,
+		GameDuration:  60.0, // 60 seconds per map
+		GameOver:      false,
+		GameWon:       false,
+
+		Base: base,
+
+		CurrentMap: 0,
+		AllMaps:    maps,
+		AllTiles:   tiles,
+		EnemyPath:  path,
+
+		Coins:     100,       // Start with 100 coins
+		CoinImage: coinImage, // Coin icon
+
+		Grid: grid, // Initialize grid for pathfinding
 	}
 
 	ebiten.SetWindowSize(windowWidth, windowHeight)
 	ebiten.SetWindowTitle("Myth Defense - Title Screen")
 	ebiten.RunGame(mythGame)
+}
+
+// updateGridWithTowers updates the grid to mark tower positions as blocked
+func (g *MythDefense) updateGridWithTowers() {
+	// Reset grid to walkable (keep only map obstacles)
+	if titleMap != nil {
+		g.Grid = createGridFromMap(titleMap)
+	}
+
+	// Mark tower positions as blocked
+	for _, tower := range g.Towers {
+		// Convert tower pixel position to grid coordinates
+		gridX := int(tower.X+16) / 32 // +16 to get center of tower
+		gridY := int(tower.Y+16) / 32
+
+		if gridY >= 0 && gridY < len(g.Grid) && gridX >= 0 && gridX < len(g.Grid[0]) {
+			g.Grid[gridY][gridX] = 1 // Mark as blocked
+		}
+	}
+}
+
+// recalculateEnemyPaths recalculates paths for all enemies
+func (g *MythDefense) recalculateEnemyPaths() {
+	start := Node{X: 0, Y: 0}
+	end := Node{X: 20, Y: 20}
+
+	newPath := AStar(g.Grid, start, end)
+	if newPath == nil {
+		// If no path found, keep old path
+		return
+	}
+
+	// Update path for all existing enemies
+	for _, enemy := range g.Enemies {
+		// Find closest node in new path to enemy's current position
+		currentGridX := int(enemy.X) / 32
+		currentGridY := int(enemy.Y) / 32
+
+		minDist := math.MaxFloat64
+		closestIndex := 0
+
+		for i, node := range newPath {
+			dx := float64(node.X - currentGridX)
+			dy := float64(node.Y - currentGridY)
+			dist := dx*dx + dy*dy
+
+			if dist < minDist {
+				minDist = dist
+				closestIndex = i
+			}
+		}
+
+		// Update enemy path starting from closest node
+		enemy.Path = newPath
+		enemy.PathIndex = closestIndex
+		// Preserve slow effect when recalculating path
+		// No changes needed here as slow duration and multiplier are already part of enemy
+	}
+
+	// Update the spawn path
+	g.EnemyPath = newPath
+}
+
+// loadNextMap loads the next map and resets the game state
+func (g *MythDefense) loadNextMap() {
+	g.CurrentMap++
+
+	// Check if there are more maps available
+	if g.CurrentMap >= len(g.AllMaps) {
+		// No more maps - game completed!
+		g.GameOver = true
+		g.GameWon = true
+		return
+	}
+
+	// Load the next map
+	titleMap = g.AllMaps[g.CurrentMap]
+	titleTileImages = g.AllTiles[g.CurrentMap]
+
+	// Create new grid and path for the new map
+	grid := createGridFromMap(titleMap)
+	g.Grid = grid
+	start := Node{X: 0, Y: 0}
+	end := Node{X: 20, Y: 20}
+	path := AStar(grid, start, end)
+	if path == nil {
+		path = []Node{{X: 0, Y: 0}, {X: 10, Y: 10}, {X: 20, Y: 20}}
+	}
+	g.EnemyPath = path
+
+	// Reset game state
+	g.Enemies = []*Enemies{}
+	g.Bullets = []*Bullet{}
+	g.Towers = []*Towers{}
+	g.SpawnTimer = 10.0 // Set to interval so enemies spawn immediately
+	g.GameTimer = 0.0
+	g.GameOver = false
+	g.GameWon = false
+
+	// Keep coins when advancing to next map (players carry over their progress)
+	// g.Coins = 100 // Uncomment this if you want to reset coins each map
+
+	// Reset base health
+	if g.Base != nil {
+		g.Base.BaseHealth = g.Base.MaxHealth
+	}
 }
